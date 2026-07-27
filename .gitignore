@@ -1,0 +1,16 @@
+node_modules/
+
+# Real secrets live in Render's dashboard, never in git.
+.env
+.env.local
+.env.*.local
+
+npm-debug.log*
+yarn-error.log*
+logs/
+*.log
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
