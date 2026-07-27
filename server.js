@@ -34,6 +34,9 @@ app.use(cors({
       origin.match(/https?:\/\/10\.\d+\.\d+\.\d+/) ||
       origin.match(/https?:\/\/172\.\d+\.\d+\.\d+/) ||
       origin.startsWith('exp://') ||
+      // The admin dashboard is on Vercel, which mints a new subdomain for
+      // every preview deploy — pinning one URL would break on each redeploy.
+      origin.match(/^https:\/\/[a-z0-9-]+\.vercel\.app$/) ||
       allowedOrigins.some(o => origin.startsWith(o.trim()))
     ) return callback(null, true);
     callback(new Error(`CORS blocked: ${origin}`));
