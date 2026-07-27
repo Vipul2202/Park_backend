@@ -32,6 +32,12 @@ services:
       - key: RAZORPAY_KEY_SECRET
         sync: false
 
+      # Password for the seeded admin account (+919000000001). Without this
+      # the account falls back to the value committed in db/inMemoryDb.js,
+      # which is public — set it before exposing the dashboard.
+      - key: ADMIN_PASSWORD
+        sync: false
+
       - key: PLATFORM_COMMISSION_PCT
         value: "15"
       - key: GST_PCT

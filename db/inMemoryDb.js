@@ -66,7 +66,9 @@ const USERS = [
     id: 'admin-001',
     phone_number: '+919000000001',
     email: 'admin@parkease.in',
-    password_hash: bcrypt.hashSync('Admin@2026!', 10),
+    // The fallback is committed and therefore public. Any deployment that
+    // is reachable from the internet must set ADMIN_PASSWORD.
+    password_hash: bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'Admin@2026!', 10),
     full_name: 'ParkEase Admin',
     avatar_url: null,
     active_role: 'ADMIN',
