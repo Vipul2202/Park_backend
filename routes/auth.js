@@ -3,7 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const { USERS, OTP_STORE, REFRESH_TOKENS } = require('../db/inMemoryDb');
+const { USERS, SEEDED_PHONES, OTP_STORE, REFRESH_TOKENS } = require('../db/inMemoryDb');
 const { authenticate } = require('../middleware/auth');
 
 // ── Helper: generate tokens ──────────────────────────────────────
@@ -18,22 +18,32 @@ const generateTokens = (user) => {
 // ── Helper: generate 6-digit OTP ────────────────────────────────
 const generateOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
 
+// No SMS gateway is wired up, so a randomly generated OTP can only be read
+// from the server log — which makes the deployed demo unusable. The seeded
+// accounts therefore accept a fixed code. Numbers that registered at runtime
+// are untouched and still get a random OTP.
+const DEMO_OTP = process.env.DEMO_OTP || '000000';
+const isDemoPhone = (phone) => SEEDED_PHONES.includes(phone);
+
 // POST /api/v1/auth/send-otp
 // Body: { phone }
 router.post('/send-otp', (req, res) => {
   const { phone } = req.body;
   if (!phone) return res.status(400).json({ success: false, message: 'Phone number required' });
 
-  const otp = generateOtp();
+  const demo = isDemoPhone(phone);
+  const otp = demo ? DEMO_OTP : generateOtp();
   const expiry = Date.now() + 5 * 60 * 1000; // 5 min
   OTP_STORE[phone] = { otp, expiry };
 
-  console.log(`[OTP] Phone: ${phone} → OTP: ${otp} (Dev mode — use this code)`);
+  console.log(`[OTP] Phone: ${phone} → OTP: ${otp}${demo ? ' (seeded demo account)' : ''}`);
 
   res.json({
     success: true,
-    message: 'OTP sent successfully',
-    // In dev mode, return OTP so frontend can display it
+    message: demo ? `Demo account — use code ${DEMO_OTP}` : 'OTP sent successfully',
+    // Only ever disclosed for the seeded accounts, whose fixed code is public
+    // anyway. A real number's OTP is never returned over the API.
+    demo_otp: demo ? DEMO_OTP : undefined,
     dev_otp: process.env.NODE_ENV === 'development' ? otp : undefined,
   });
 });

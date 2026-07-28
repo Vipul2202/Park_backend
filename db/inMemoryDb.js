@@ -82,6 +82,11 @@ const USERS = [
   },
 ];
 
+// Snapshot of the accounts that ship with the seed, taken before any runtime
+// registration can extend USERS. Auth uses it to give the demo logins a fixed
+// OTP — see routes/auth.js.
+const SEEDED_PHONES = Object.freeze(USERS.map(u => u.phone_number));
+
 // ──────────────────────────────────────────
 // OTP STORE (in-memory, 5 min TTL)
 // ──────────────────────────────────────────
@@ -120,6 +125,7 @@ const REFRESH_TOKENS = new Set();
 
 module.exports = {
   USERS,
+  SEEDED_PHONES,
   OTP_STORE,
   VEHICLES,
   PARKING_SPACES,
