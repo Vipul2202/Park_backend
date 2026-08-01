@@ -96,7 +96,18 @@ app.get('/api/v1', (req, res) => {
   });
 });
 
+// ── Uploaded images ───────────────────────────────────────────────
+// Served from disk so the admin console can actually display KYC documents.
+// crossOriginResourcePolicy is relaxed because helmet's default blocks the
+// dashboard on :3001 from loading images off this origin.
+app.use(
+  '/uploads',
+  require('helmet')({ crossOriginResourcePolicy: { policy: 'cross-origin' } }),
+  express.static(require('path').join(__dirname, 'uploads'), { maxAge: '1d' })
+);
+
 // ── Routes ────────────────────────────────────────────────────────
+app.use('/api/v1/uploads',  require('./routes/uploads'));
 app.use('/api/v1/auth',     require('./routes/auth'));
 app.use('/api/v1/parking',  require('./routes/parking'));
 app.use('/api/v1/geo',      require('./routes/geo'));

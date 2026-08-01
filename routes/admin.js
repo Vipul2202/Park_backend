@@ -426,11 +426,19 @@ router.get('/payouts', (req, res) => {
   if (status) rows = rows.filter(p => p.status === status.toUpperCase());
   rows.sort((a, b) => new Date(b.requested_at) - new Date(a.requested_at));
 
+  // Re-resolve the host name at read time so the Host column never renders
+  // blank, even for a row written before the name was captured.
+  const enriched = rows.map(p => {
+    if (p.user_name) return p;
+    const u = USERS.find(x => x.id === p.user_id);
+    return { ...p, user_name: u?.full_name || 'Unknown', user_phone: u?.phone_number || null };
+  });
+
   res.json({
     success: true,
-    count: rows.length,
+    count: enriched.length,
     pending_amount: PAYOUTS.filter(p => p.status === 'PENDING').reduce((s, p) => s + p.amount, 0),
-    payouts: rows,
+    payouts: enriched,
   });
 });
 
@@ -596,7 +604,9 @@ router.get('/users/:id', (req, res) => {
   const user = USERS.find(u => u.id === req.params.id);
   if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-  const { password_hash, ...safe } = user;
+  // biometric_token is a credential — it was being sent to the admin console
+  // alongside the password hash exclusion, which missed it.
+  const { password_hash, biometric_token, ...safe } = user;
   const wallet = WALLETS.find(w => w.user_id === user.id) || null;
 
   res.json({

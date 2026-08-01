@@ -213,4 +213,73 @@ router.get('/config', authenticate, (req, res) => {
   });
 });
 
+// ── GET /api/v1/payments/razorpay/order/:orderId/status ──────────
+/**
+ * Ask Razorpay directly whether an order was paid.
+ *
+ * The in-app checkout runs inside a WebView, and a card payment redirects out
+ * to the bank for 3-D Secure. That navigation destroys the page holding
+ * Razorpay's `handler` callback, so a genuinely successful payment could never
+ * report itself back to the app — the user returned to a spinner and then a
+ * "please try again". Asking the gateway is authoritative and survives any
+ * amount of redirecting.
+ *
+ * Marks the local payment row PAID as a side effect, so POST /bookings (which
+ * requires a captured payment) will accept the booking straight after.
+ */
+router.get('/razorpay/order/:orderId/status', authenticate, async (req, res) => {
+  const { orderId } = req.params;
+
+  const row = PAYMENTS.find((p) => p.order_id === orderId);
+  if (!row) {
+    return res.status(404).json({ success: false, message: 'Unknown order' });
+  }
+  if (row.user_id !== req.user.id) {
+    return res.status(403).json({ success: false, message: 'Not your order' });
+  }
+
+  // Already reconciled — no need to call out again.
+  if (row.status === 'PAID') {
+    return res.json({
+      success: true, paid: true, payment_id: row.payment_id,
+      method: row.method, source: 'local',
+    });
+  }
+
+  try {
+    const razorpay = getRazorpay();
+    const { items = [] } = await razorpay.orders.fetchPayments(orderId);
+
+    // `captured` is money taken. `authorized` is held but not yet captured —
+    // with AUTO capture it becomes captured, so treat it as good enough to
+    // hand the driver their slot rather than stranding them.
+    const good = items.find((p) => p.status === 'captured')
+      || items.find((p) => p.status === 'authorized');
+
+    if (!good) {
+      const failed = items.find((p) => p.status === 'failed');
+      return res.json({
+        success: true, paid: false,
+        message: failed ? (failed.error_description || 'Payment failed') : 'No payment on this order yet',
+      });
+    }
+
+    markPaid(orderId, good.id, (good.method || '').toUpperCase());
+
+    res.json({
+      success: true,
+      paid: true,
+      payment_id: good.id,
+      method: good.method,
+      captured: good.status === 'captured',
+      source: 'gateway',
+    });
+  } catch (e) {
+    res.status(502).json({
+      success: false,
+      message: e?.error?.description || e.message || 'Could not reach Razorpay',
+    });
+  }
+});
+
 module.exports = router;

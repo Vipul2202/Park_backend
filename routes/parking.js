@@ -1,8 +1,28 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const { PARKING_SPACES, USERS, REVIEWS } = require('../db/inMemoryDb');
+const { PARKING_SPACES, USERS, REVIEWS, KYC, WALLETS } = require('../db/inMemoryDb');
 const { authenticate, requireRole, optionalAuth } = require('../middleware/auth');
+
+// ── Facilities ───────────────────────────────────────────────────
+// Mirrors mobile/constants/facilities.js. Kept as an explicit allowlist so a
+// client cannot push arbitrary keys into the stored amenities object, and so
+// every spot has the same shape whether it was listed before or after the
+// facility set was widened.
+const FACILITY_KEYS = [
+  'cctv', 'securityGuard', 'gatedEntry', 'wellLit',
+  'covered', 'twentyFourSeven', 'wideSpace', 'rainProtection',
+  'evCharging', 'carWash', 'airPump', 'valet',
+  'restroom', 'liftAccess', 'stepFree', 'waitingArea',
+];
+
+const ACCESS_TYPES = ['SELF', 'HOST_OPEN', 'GUARD', 'VALET'];
+
+const normaliseFacilities = (input) => {
+  const out = {};
+  FACILITY_KEYS.forEach(k => { out[k] = input?.[k] === true; });
+  return out;
+};
 
 // ── Haversine distance calculation (km) ──────────────────────────
 const haversine = (lat1, lng1, lat2, lng2) => {
@@ -91,29 +111,94 @@ router.get('/:id', optionalAuth, (req, res) => {
 // ── POST /api/v1/parking ─────────────────────────────────────────
 // Create new listing (Host only)
 router.post('/', authenticate, requireRole('OWNER', 'ADMIN'), (req, res) => {
-  const { title, address_line, city, postal_code, latitude, longitude, total_car_slots, total_bike_slots, price_per_hour, amenities, images, compatibility } = req.body;
-  if (!title || !address_line || !city || !price_per_hour) {
-    return res.status(400).json({ success: false, message: 'Title, address, city and price are required' });
+  const {
+    title, address_line, city, postal_code, latitude, longitude,
+    total_car_slots, total_bike_slots, price_per_hour, amenities, images,
+    compatibility, space_category, safety_ack, access_type, driver_note,
+  } = req.body;
+
+  // ── Onboarding gate ──────────────────────────────────────────────
+  // A host must have their identity on file and somewhere to be paid before
+  // a listing can exist. Admins are exempt so they can seed spots directly.
+  if (req.user.role !== 'ADMIN') {
+    const kyc = KYC.find(k => k.user_id === req.user.id);
+    if (!kyc || kyc.verification_status === 'REJECTED') {
+      return res.status(403).json({
+        success: false,
+        code: 'KYC_REQUIRED',
+        message: 'Complete your identity verification before listing a space',
+      });
+    }
+    const wallet = WALLETS.find(w => w.user_id === req.user.id);
+    if (!wallet || !(wallet.upi_id || wallet.bank_account_number)) {
+      return res.status(403).json({
+        success: false,
+        code: 'PAYOUT_REQUIRED',
+        message: 'Add a bank account or UPI ID before listing a space',
+      });
+    }
+  }
+
+  // ── Field validation ─────────────────────────────────────────────
+  const price = parseFloat(price_per_hour);
+  const fieldError =
+    (String(title || '').trim().length < 3 ? 'Give the listing a name of at least 3 characters' : null) ||
+    (String(address_line || '').trim().length < 5 ? 'Enter a full address' : null) ||
+    (String(city || '').trim().length < 2 ? 'Enter the city' : null) ||
+    (!Number.isFinite(price) || price <= 0 ? 'Enter a price above ₹0' : null) ||
+    (price > 5000 ? 'Price per hour looks too high (max ₹5000)' : null);
+  if (fieldError) {
+    return res.status(400).json({ success: false, message: fieldError });
+  }
+
+  // A home/driveway listing puts a stranger's vehicle on private property, so
+  // the host has to accept the check-the-vehicle duty explicitly. Commercial
+  // lots are staffed and carry no such prompt.
+  const category = space_category === 'PERSONAL' ? 'PERSONAL' : 'COMMERCIAL';
+  if (category === 'PERSONAL' && safety_ack !== true) {
+    return res.status(400).json({
+      success: false,
+      code: 'SAFETY_ACK_REQUIRED',
+      message: 'Accept the personal-space safety responsibilities to continue',
+    });
+  }
+
+  // A bike-only listing sends 0 car slots — `|| 1` would treat that explicit 0
+  // as "missing" and hand back a car slot the host never offered.
+  const asCount = (v, fallback) => {
+    const n = parseInt(v);
+    return Number.isNaN(n) || n < 0 ? fallback : n;
+  };
+  const carSlots  = asCount(total_car_slots, 1);
+  const bikeSlots = asCount(total_bike_slots, 0);
+
+  if (carSlots + bikeSlots < 1) {
+    return res.status(400).json({ success: false, message: 'Add at least one parking slot' });
   }
 
   const newSpot = {
     id: `spot-${uuidv4().slice(0, 8)}`,
     owner_id: req.user.id,
-    title,
-    address_line,
-    city: city || 'Bengaluru',
+    title: String(title).trim(),
+    address_line: String(address_line).trim(),
+    city: String(city).trim(),
+    space_category: category,
+    safety_ack: category === 'PERSONAL',
+    safety_ack_at: category === 'PERSONAL' ? new Date().toISOString() : null,
     postal_code: postal_code || '',
     latitude: parseFloat(latitude) || 12.9716,
     longitude: parseFloat(longitude) || 77.5946,
-    total_car_slots: parseInt(total_car_slots) || 1,
-    total_bike_slots: parseInt(total_bike_slots) || 0,
-    available_car_slots: parseInt(total_car_slots) || 1,
-    available_bike_slots: parseInt(total_bike_slots) || 0,
+    total_car_slots: carSlots,
+    total_bike_slots: bikeSlots,
+    available_car_slots: carSlots,
+    available_bike_slots: bikeSlots,
     price_per_hour: parseFloat(price_per_hour),
     surge_multiplier: 1.0,
     approval_status: 'PENDING_APPROVAL',
     is_active: false,
-    amenities: amenities || { covered: false, evCharging: false, cctv: false, securityGuard: false, twentyFourSeven: false },
+    amenities: normaliseFacilities(amenities),
+    access_type: ACCESS_TYPES.includes(access_type) ? access_type : 'SELF',
+    driver_note: String(driver_note || '').trim().slice(0, 280) || null,
     images: images || [],
     compatibility: compatibility || ['Car'],
     rating: 0,
@@ -131,10 +216,69 @@ router.put('/:id', authenticate, requireRole('OWNER', 'ADMIN'), (req, res) => {
   const idx = PARKING_SPACES.findIndex(s => s.id === req.params.id);
   if (idx === -1) return res.status(404).json({ success: false, message: 'Spot not found' });
   const spot = PARKING_SPACES[idx];
-  if (spot.owner_id !== req.user.id && req.user.role !== 'ADMIN') {
+  const isAdmin = req.user.role === 'ADMIN';
+  if (spot.owner_id !== req.user.id && !isAdmin) {
     return res.status(403).json({ success: false, message: 'Not authorized to edit this spot' });
   }
-  PARKING_SPACES[idx] = { ...spot, ...req.body, id: spot.id, owner_id: spot.owner_id };
+
+  // Spreading req.body wholesale let an owner send approval_status:'APPROVED'
+  // and publish their own listing without review — and rewrite rating too.
+  // Owners may only touch the fields below; the rest stay admin-only.
+  const OWNER_EDITABLE = [
+    'title', 'address_line', 'city', 'postal_code', 'latitude', 'longitude',
+    'price_per_hour', 'total_car_slots', 'total_bike_slots',
+    'amenities', 'images', 'compatibility', 'is_active',
+    'access_type', 'driver_note',
+  ];
+
+  const patch = {};
+  const source = isAdmin ? Object.keys(req.body) : OWNER_EDITABLE;
+  source.forEach(key => {
+    if (Object.prototype.hasOwnProperty.call(req.body, key)) patch[key] = req.body[key];
+  });
+
+  // Two separate gates before a space can be seen by drivers:
+  //   1. the listing itself has been reviewed, and
+  //   2. the owner's identity is actually verified — not merely submitted.
+  // A host may create a listing while KYC is pending, but nothing of theirs
+  // becomes public until an admin has approved the person behind it.
+  if (patch.is_active === true && !isAdmin) {
+    if (spot.approval_status !== 'APPROVED') {
+      return res.status(403).json({
+        success: false,
+        code: 'NOT_APPROVED',
+        message: 'This space is still awaiting admin approval',
+      });
+    }
+    const ownerKyc = KYC.find(k => k.user_id === spot.owner_id);
+    if (ownerKyc?.verification_status !== 'VERIFIED') {
+      return res.status(403).json({
+        success: false,
+        code: 'KYC_NOT_VERIFIED',
+        message: 'Your identity must be verified before your space can go public',
+      });
+    }
+  }
+
+  // Same normalising as create, so an edit cannot smuggle in unknown keys or
+  // an invalid access type.
+  if (patch.amenities !== undefined) patch.amenities = normaliseFacilities(patch.amenities);
+  if (patch.access_type !== undefined && !ACCESS_TYPES.includes(patch.access_type)) {
+    return res.status(400).json({ success: false, message: 'Unknown access type' });
+  }
+  if (patch.driver_note !== undefined) {
+    patch.driver_note = String(patch.driver_note || '').trim().slice(0, 280) || null;
+  }
+
+  if (patch.price_per_hour !== undefined) {
+    const p = parseFloat(patch.price_per_hour);
+    if (!Number.isFinite(p) || p <= 0 || p > 5000) {
+      return res.status(400).json({ success: false, message: 'Price must be between ₹1 and ₹5000' });
+    }
+    patch.price_per_hour = p;
+  }
+
+  PARKING_SPACES[idx] = { ...spot, ...patch, id: spot.id, owner_id: spot.owner_id };
   res.json({ success: true, message: 'Spot updated', spot: PARKING_SPACES[idx] });
 });
 

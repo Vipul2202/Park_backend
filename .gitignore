@@ -14,3 +14,7 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+
+# Uploaded KYC documents and spot photos. User-submitted content — never commit
+# it. The directory is recreated at boot by routes/uploads.js.
+uploads/

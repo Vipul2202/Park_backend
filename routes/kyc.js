@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
-const { KYC, USERS } = require('../db/inMemoryDb');
+const { KYC, USERS, PARKING_SPACES } = require('../db/inMemoryDb');
 const { authenticate, requireRole } = require('../middleware/auth');
+const { checkAadhaar, checkPan, digitsOnly } = require('../utils/validate');
 
 // ── GET /api/v1/kyc/status ────────────────────────────────────────
 router.get('/status', authenticate, (req, res) => {
@@ -19,8 +20,22 @@ router.get('/status', authenticate, (req, res) => {
 // Body: { aadhaar_number, pan_number, aadhaar_front_url, pan_card_url, selfie_photo_url, driving_license_url? }
 router.post('/submit', authenticate, (req, res) => {
   const { aadhaar_number, pan_number, aadhaar_front_url, pan_card_url, selfie_photo_url, driving_license_url } = req.body;
-  if (!aadhaar_number || !pan_number || !aadhaar_front_url || !selfie_photo_url) {
-    return res.status(400).json({ success: false, message: 'Aadhaar number, PAN, document photo and selfie are required' });
+
+  // Validate the raw numbers before the Aadhaar gets masked below.
+  const fieldError =
+    checkAadhaar(aadhaar_number) ||
+    checkPan(pan_number) ||
+    (!aadhaar_front_url ? 'Aadhaar photo is required' : null) ||
+    (!selfie_photo_url ? 'Selfie is required' : null);
+  if (fieldError) {
+    return res.status(400).json({ success: false, message: fieldError });
+  }
+
+  // Re-submitting over an already-approved record would silently drop the
+  // host back to PENDING, so it is refused outright.
+  const already = KYC.find(k => k.user_id === req.user.id);
+  if (already && already.verification_status === 'VERIFIED') {
+    return res.status(409).json({ success: false, message: 'Your KYC is already verified' });
   }
 
   // Check if already submitted
@@ -35,8 +50,10 @@ router.post('/submit', authenticate, (req, res) => {
     email: user ? user.email : null,
     phone: user ? user.phone_number : null,
     role: user ? user.active_role : 'SEEKER',
-    aadhaar_number: aadhaar_number.replace(/\d(?=\d{4})/g, 'X'), // mask digits
-    pan_number,
+    // Strip separators first, else a "1234 5678 9012" input keeps its spaces
+    // and only part of it gets masked.
+    aadhaar_number: digitsOnly(aadhaar_number).replace(/\d(?=\d{4})/g, 'X'),
+    pan_number: String(pan_number).trim().toUpperCase(),
     aadhaar_front_url,
     pan_card_url: pan_card_url || null,
     selfie_photo_url,
@@ -94,7 +111,25 @@ router.patch('/admin/:id/reject', authenticate, requireRole('ADMIN'), (req, res)
   const user = USERS.find(u => u.id === KYC[idx].user_id);
   if (user) user.kyc_status = 'REJECTED';
 
-  res.json({ success: true, message: 'KYC rejected', kyc: KYC[idx] });
+  // An unverified host must not have anything public. Rejecting their identity
+  // takes their live spaces down straight away rather than leaving them
+  // bookable until someone notices.
+  let pulled = 0;
+  PARKING_SPACES.forEach(s => {
+    if (s.owner_id === KYC[idx].user_id && s.is_active) {
+      s.is_active = false;
+      pulled++;
+    }
+  });
+
+  res.json({
+    success: true,
+    message: pulled
+      ? `KYC rejected — ${pulled} live space${pulled > 1 ? 's' : ''} taken offline`
+      : 'KYC rejected',
+    kyc: KYC[idx],
+    spaces_deactivated: pulled,
+  });
 });
 
 module.exports = router;

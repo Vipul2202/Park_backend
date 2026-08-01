@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { WALLETS, TRANSACTIONS, USERS } = require('../db/inMemoryDb');
+const { PAYOUTS } = require('../db/settingsDb');
 const { authenticate, requireRole } = require('../middleware/auth');
+const { checkPayoutMethod, digitsOnly } = require('../utils/validate');
 
 // ── GET /api/v1/wallet ────────────────────────────────────────────
 router.get('/', authenticate, (req, res) => {
@@ -56,6 +58,28 @@ router.post('/withdraw', authenticate, requireRole('OWNER'), (req, res) => {
   };
   TRANSACTIONS.push(txn);
 
+  // A withdrawal is also a payout request an admin has to action. Without this
+  // the money left the host's balance but nothing ever reached the admin
+  // Payouts queue — PAYOUTS was declared and never written to — so there was
+  // no way to approve or reject it, and the Host column had no name to show.
+  const payoutUser = USERS.find(u => u.id === req.user.id);
+  PAYOUTS.push({
+    id: `po-${uuidv4().slice(0, 8)}`,
+    user_id: req.user.id,
+    user_name: payoutUser?.full_name || 'Unknown',
+    user_phone: payoutUser?.phone_number || null,
+    amount: amt,
+    method: wallet.upi_id ? 'UPI' : 'BANK',
+    destination: wallet.upi_id
+      || `${wallet.bank_name || 'Bank'} ···${String(wallet.bank_account_number || '').slice(-4)}`,
+    status: 'PENDING',
+    transaction_id: txn.id,
+    requested_at: new Date().toISOString(),
+    processed_at: null,
+    reference: null,
+    reason: null,
+  });
+
   // Simulate processing → completed after 2s
   setTimeout(() => { txn.status = 'COMPLETED'; }, 2000);
 
@@ -66,17 +90,21 @@ router.post('/withdraw', authenticate, requireRole('OWNER'), (req, res) => {
 // Body: { bank_account_number, ifsc_code, bank_name, upi_id }
 router.put('/bank-details', authenticate, (req, res) => {
   const { bank_account_number, ifsc_code, bank_name, upi_id } = req.body;
+
+  const err = checkPayoutMethod({ bank_account_number, ifsc_code, bank_name, upi_id });
+  if (err) return res.status(400).json({ success: false, message: err });
+
   let wallet = WALLETS.find(w => w.user_id === req.user.id);
   if (!wallet) {
     wallet = { id: `wallet-${uuidv4().slice(0,8)}`, user_id: req.user.id, balance: 0 };
     WALLETS.push(wallet);
   }
-  if (bank_account_number) wallet.bank_account_number = bank_account_number;
-  if (ifsc_code) wallet.ifsc_code = ifsc_code;
-  if (bank_name) wallet.bank_name = bank_name;
-  if (upi_id) wallet.upi_id = upi_id;
+  if (bank_account_number) wallet.bank_account_number = digitsOnly(bank_account_number);
+  if (ifsc_code)           wallet.ifsc_code = String(ifsc_code).trim().toUpperCase();
+  if (bank_name)           wallet.bank_name = String(bank_name).trim();
+  if (upi_id)              wallet.upi_id = String(upi_id).trim();
   wallet.updated_at = new Date().toISOString();
-  res.json({ success: true, message: 'Bank details updated', wallet });
+  res.json({ success: true, message: 'Payout details saved', wallet });
 });
 
 // ── POST /api/v1/wallet/credit (admin/internal) ───────────────────
